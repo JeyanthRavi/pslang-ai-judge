@@ -51,7 +51,9 @@ NEXT_PUBLIC_JUDGE_MODE=local
 # Flux Endpoint (if using flux mode)
 NEXT_PUBLIC_JUDGE_API_BASE=https://your-flux-endpoint.com
 
-# Shardeum Contract Address (if deployed)
+# Shardeum Contract Address (set after deploying contract)
+# Deploy: cd contracts && npm install && npm run deploy
+# Then copy the printed address here:
 NEXT_PUBLIC_VERDICT_CONTRACT_ADDRESS=0x...
 ```
 
@@ -103,12 +105,14 @@ Same as above, plus:
 - **Where:** Verdict step → Settlement section
 - **Proof:** Wallet connect, network check, transaction execution, explorer link
 - **Chain:** Shardeum Sphinx (chainId 8082, RPC: https://sphinx.shardeum.org/)
+- **Contract Address:** Set via `NEXT_PUBLIC_VERDICT_CONTRACT_ADDRESS` env var (see Deployed Addresses section below)
 
 ### INCO (Confidential Evaluation)
-- **Status:** ✅ Local Proof (ready for SDK)
+- **Status:** ✅ Local Proof (adapter + receipt objects, ready for SDK)
 - **Where:** Deliberation step (badge), Verdict step (confidential receipt)
 - **Proof:** Toggle INCO mode, see receipt panel
 - **Implementation:** Adapter interface ready for INCO SDK integration
+- **Contract Address:** N/A (no on-chain address in current build; address appears only when INCO SDK/chain is configured)
 
 ### Flux (Decentralized Compute)
 - **Status:** ✅ Ready (LIVE with deployment)
@@ -117,6 +121,35 @@ Same as above, plus:
 - **Deployment:** See `FLUX_DEPLOYMENT.md`
 
 **Detailed sponsor info:** See `SPONSORS.md`
+
+---
+
+## Deployed Addresses
+
+### Shardeum Sphinx (chainId 8082)
+
+**Contract Address:** Set via `NEXT_PUBLIC_VERDICT_CONTRACT_ADDRESS` environment variable
+
+The contract address is read from your `.env.local` file at runtime. To deploy:
+
+```bash
+cd contracts
+npm install
+npm run deploy
+```
+
+Copy the printed address and add to `.env.local`:
+```bash
+NEXT_PUBLIC_VERDICT_CONTRACT_ADDRESS=0x...
+```
+
+**Explorer:** https://explorer-sphinx.shardeum.org/address/{CONTRACT_ADDRESS}
+
+### INCO
+
+**Contract Address:** N/A
+
+No on-chain address in current build. INCO integration uses LOCAL_PROOF adapter with receipt objects. An on-chain address will appear only when INCO SDK/chain credentials are configured.
 
 ---
 
