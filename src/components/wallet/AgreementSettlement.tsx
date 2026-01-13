@@ -1,13 +1,28 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useAccount, useConnect, useSwitchChain, useWriteContract, useWaitForTransactionReceipt, useReadContract } from "wagmi";
-import { Address } from "viem";
 import { shardeumSphinx, VERDICT_CONTRACT_ADDRESS } from "@/lib/chains";
 import Button from "@/components/ui/Button";
 import Badge from "@/components/ui/Badge";
 import { AgreementData } from "@/types/pipeline";
-import { simulateTransaction, getSimulatedContractState } from "@/lib/simulatedWallet";
+
+// Conditionally import wagmi only in MetaMask mode
+const walletMode = process.env.NEXT_PUBLIC_WALLET_MODE || "relayer";
+const useMetaMask = walletMode === "metamask";
+
+// Dynamic imports for wagmi (only if MetaMask mode)
+let useAccount: any, useConnect: any, useSwitchChain: any, useWriteContract: any, useWaitForTransactionReceipt: any, useReadContract: any, Address: any;
+if (useMetaMask) {
+  const wagmi = require("wagmi");
+  const viem = require("viem");
+  useAccount = wagmi.useAccount;
+  useConnect = wagmi.useConnect;
+  useSwitchChain = wagmi.useSwitchChain;
+  useWriteContract = wagmi.useWriteContract;
+  useWaitForTransactionReceipt = wagmi.useWaitForTransactionReceipt;
+  useReadContract = wagmi.useReadContract;
+  Address = viem.Address;
+}
 
 // Agreement ABI
 const AGREEMENT_ABI = [
@@ -55,18 +70,33 @@ interface AgreementSettlementProps {
 }
 
 export default function AgreementSettlement({ agreementData, caseHash, evidenceRoot, onTxHashUpdate, onVerifiedUpdate }: AgreementSettlementProps) {
-  const { address, isConnected, chainId } = useAccount();
-  const { connect, connectors } = useConnect();
-  const { switchChain } = useSwitchChain();
-  const { writeContract, data: hash, isPending, error } = useWriteContract();
-  const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({
-    hash,
-  });
+  // Wagmi hooks (only in MetaMask mode)
+  const wagmiAccount = useMetaMask ? useAccount() : { address: undefined, isConnected: false, chainId: undefined };
+  const wagmiConnect = useMetaMask ? useConnect() : { connect: () => {}, connectors: [] };
+  const wagmiSwitchChain = useMetaMask ? useSwitchChain() : { switchChain: () => {} };
+  const wagmiWriteContract = useMetaMask ? useWriteContract() : { writeContract: () => {}, data: null, isPending: false, error: null };
+  const wagmiWaitReceipt = useMetaMask ? useWaitForTransactionReceipt({ hash: wagmiWriteContract.data }) : { isLoading: false, isSuccess: false };
+  const wagmiReadContract = useMetaMask ? useReadContract({
+    address: VERDICT_CONTRACT_ADDRESS ? (VERDICT_CONTRACT_ADDRESS as any) : undefined,
+    abi: AGREEMENT_ABI,
+    functionName: "getAgreement",
+    args: undefined,
+    query: { enabled: false },
+  }) : { data: null, refetch: async () => ({ data: null }) };
+
+  const { address, isConnected, chainId } = wagmiAccount;
+  const { connect, connectors } = wagmiConnect;
+  const { switchChain } = wagmiSwitchChain;
+  const { writeContract, data: hash, isPending, error } = wagmiWriteContract;
+  const { isLoading: isConfirming, isSuccess: isConfirmed } = wagmiWaitReceipt;
+  const { data: onChainAgreement, refetch: refetchAgreement } = wagmiReadContract;
 
   const [txHash, setTxHash] = useState<string | null>(agreementData.txHash || null);
   const [isVerifying, setIsVerifying] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
   const [verified, setVerified] = useState(false);
   const [verificationError, setVerificationError] = useState<string | null>(null);
+  const [relayerAddress, setRelayerAddress] = useState<string | null>(null);
 
   // Check if both signatures exist
   const canRecord = agreementData.partyA && agreementData.partyB && !txHash;
@@ -77,80 +107,92 @@ export default function AgreementSettlement({ agreementData, caseHash, evidenceR
   const evidenceRootBytes = evidenceRoot as `0x${string}`;
   const termsHashBytes = (agreementData.contractReceipt?.confidentialTermsHash || agreementData.termsHash) as `0x${string}`;
 
-  // Read contract hook for verification
-  const { data: onChainAgreement, refetch: refetchAgreement } = useReadContract({
-    address: VERDICT_CONTRACT_ADDRESS ? (VERDICT_CONTRACT_ADDRESS as Address) : undefined,
-    abi: AGREEMENT_ABI,
-    functionName: "getAgreement",
-    args: agreementIdBytes ? [agreementIdBytes] : undefined,
-    query: {
-      enabled: false, // Only fetch when explicitly called
-    },
-  });
-
   // Update tx hash when transaction is confirmed
   useEffect(() => {
-    if (isConfirmed && hash) {
+    if (useMetaMask && isConfirmed && hash) {
       setTxHash(hash);
+      if (onTxHashUpdate) {
+        onTxHashUpdate(hash);
+      }
     }
-  }, [isConfirmed, hash]);
+  }, [isConfirmed, hash, onTxHashUpdate]);
 
-  const handleRecord = async () => {
+  // Relayer mode: record via API
+  const handleRecordRelayer = async () => {
     if (!canRecord || !agreementData.partyA || !agreementData.partyB) return;
 
-    const walletMode = process.env.NEXT_PUBLIC_WALLET_MODE || "external";
-    const useSim = walletMode === "sim";
+    setIsRecording(true);
+    setVerificationError(null);
 
-    if (useSim) {
-      // Use simulated transaction
-      const partyAAddress = agreementData.partyA.address as Address;
-      const partyBAddress = agreementData.partyB.address as Address;
+    try {
+      const partyAAddress = agreementData.partyA.address as `0x${string}`;
+      const partyBAddress = agreementData.partyB.address as `0x${string}`;
       const sigA = agreementData.partyA.signature as `0x${string}`;
       const sigB = agreementData.partyB.signature as `0x${string}`;
 
-      const txHash = await simulateTransaction(
-        VERDICT_CONTRACT_ADDRESS || "0x0000000000000000000000000000000000000000",
-        "recordAgreement",
-        [
-          agreementIdBytes,
-          caseHashBytes,
-          evidenceRootBytes,
-          termsHashBytes,
-          partyAAddress,
-          partyBAddress,
+      const response = await fetch("/api/chain/record-agreement", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agreementId: agreementIdBytes,
+          caseHash: caseHashBytes,
+          evidenceRoot: evidenceRootBytes,
+          termsHash: termsHashBytes,
+          partyA: partyAAddress,
+          partyB: partyBAddress,
           sigA,
           sigB,
-        ],
-        partyAAddress
-      );
-
-      setTxHash(txHash);
-      if (onTxHashUpdate) {
-        onTxHashUpdate(txHash);
-      }
-    } else {
-      // Use real wallet
-      const partyAAddress = agreementData.partyA.address as Address;
-      const partyBAddress = agreementData.partyB.address as Address;
-      const sigA = agreementData.partyA.signature as `0x${string}`;
-      const sigB = agreementData.partyB.signature as `0x${string}`;
-
-      writeContract({
-        address: VERDICT_CONTRACT_ADDRESS as Address,
-        abi: AGREEMENT_ABI,
-        functionName: "recordAgreement",
-        args: [
-          agreementIdBytes,
-          caseHashBytes,
-          evidenceRootBytes,
-          termsHashBytes,
-          partyAAddress,
-          partyBAddress,
-          sigA,
-          sigB,
-        ],
+        }),
       });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Failed to record agreement");
+      }
+
+      const { txHash: newTxHash } = await response.json();
+      setTxHash(newTxHash);
+
+      // Get relayer address from response
+      if (response.headers.get("x-relayer-address")) {
+        setRelayerAddress(response.headers.get("x-relayer-address"));
+      }
+
+      if (onTxHashUpdate) {
+        onTxHashUpdate(newTxHash);
+      }
+    } catch (err) {
+      console.error("Relayer agreement error:", err);
+      setVerificationError(err instanceof Error ? err.message : "Failed to record agreement");
+    } finally {
+      setIsRecording(false);
     }
+  };
+
+  // MetaMask mode: record via wallet
+  const handleRecordMetaMask = async () => {
+    if (!canRecord || !agreementData.partyA || !agreementData.partyB) return;
+
+    const partyAAddress = agreementData.partyA.address as any;
+    const partyBAddress = agreementData.partyB.address as any;
+    const sigA = agreementData.partyA.signature as `0x${string}`;
+    const sigB = agreementData.partyB.signature as `0x${string}`;
+
+    writeContract({
+      address: VERDICT_CONTRACT_ADDRESS as any,
+      abi: AGREEMENT_ABI,
+      functionName: "recordAgreement",
+      args: [
+        agreementIdBytes,
+        caseHashBytes,
+        evidenceRootBytes,
+        termsHashBytes,
+        partyAAddress,
+        partyBAddress,
+        sigA,
+        sigB,
+      ],
+    });
   };
 
   const handleVerify = async () => {
@@ -159,38 +201,27 @@ export default function AgreementSettlement({ agreementData, caseHash, evidenceR
     setIsVerifying(true);
     setVerificationError(null);
 
-    const walletMode = process.env.NEXT_PUBLIC_WALLET_MODE || "external";
-    const useSim = walletMode === "sim";
-
     try {
       let onChain: any;
 
-      if (useSim) {
-        // Read from simulated storage
-        const stored = getSimulatedContractState(
-          VERDICT_CONTRACT_ADDRESS || "0x0000000000000000000000000000000000000000",
-          "getAgreement",
-          [agreementIdBytes]
-        );
-
-        if (!stored || !stored[0]) {
-          setVerificationError("Agreement not found in simulated storage");
-          setIsVerifying(false);
-          return;
-        }
-
-        // Simulated contract returns same structure as real contract
-        onChain = stored;
-      } else {
-        // Use real contract read
+      if (useMetaMask && isConnected) {
+        // Use wagmi read contract
         const result = await refetchAgreement();
         onChain = result.data;
-
-        if (!onChain) {
-          setVerificationError("Agreement not found on-chain");
-          setIsVerifying(false);
-          return;
+      } else {
+        // Use API read
+        const response = await fetch(`/api/chain/read-agreement?agreementId=${agreementIdBytes}`);
+        if (!response.ok) {
+          throw new Error("Failed to read agreement");
         }
+        const { agreement } = await response.json();
+        onChain = agreement;
+      }
+
+      if (!onChain) {
+        setVerificationError("Agreement not found on-chain");
+        setIsVerifying(false);
+        return;
       }
 
       // Destructure tuple return
@@ -229,9 +260,9 @@ export default function AgreementSettlement({ agreementData, caseHash, evidenceR
     }
   };
 
-  // Check network
-  const isCorrectNetwork = chainId === shardeumSphinx.id;
-  const needsNetworkSwitch = isConnected && !isCorrectNetwork;
+  // Check network (MetaMask mode only)
+  const isCorrectNetwork = useMetaMask ? chainId === shardeumSphinx.id : true;
+  const needsNetworkSwitch = useMetaMask && isConnected && !isCorrectNetwork;
 
   if (!canRecord && !txHash) {
     return (
@@ -243,30 +274,14 @@ export default function AgreementSettlement({ agreementData, caseHash, evidenceR
     );
   }
 
-  return (
-    <div style={{ padding: "16px", background: "var(--bg-card)", borderRadius: "8px", marginTop: "16px" }}>
-      <h3 style={{ fontSize: "18px", fontWeight: 600, marginBottom: "16px" }}>
-        Record Agreement on Shardeum
-      </h3>
-
-      {process.env.NEXT_PUBLIC_WALLET_MODE === "sim" ? (
-        <div>
-          <div style={{ marginBottom: "12px" }}>
-            <Badge variant="default">Simulated Wallet Mode</Badge>
-          </div>
-          <div style={{ fontSize: "14px", color: "var(--text-dim)", marginBottom: "12px" }}>
-            Record agreement using simulated wallet
-          </div>
-          <Button
-            onClick={handleRecord}
-            disabled={isPending || isConfirming || !canRecord}
-            variant="primary"
-          >
-            {isPending || isConfirming ? "Recording..." : "Record Agreement (Sim)"}
-          </Button>
-        </div>
-      ) : !isConnected ? (
-        <div>
+  // MetaMask mode: show wallet connection flow
+  if (useMetaMask) {
+    if (!isConnected) {
+      return (
+        <div style={{ padding: "16px", background: "var(--bg-card)", borderRadius: "8px", marginTop: "16px" }}>
+          <h3 style={{ fontSize: "18px", fontWeight: 600, marginBottom: "16px" }}>
+            Record Agreement on Shardeum
+          </h3>
           <div style={{ fontSize: "14px", color: "var(--text-dim)", marginBottom: "12px" }}>
             Connect wallet to record agreement on-chain
           </div>
@@ -274,8 +289,15 @@ export default function AgreementSettlement({ agreementData, caseHash, evidenceR
             Connect Wallet
           </Button>
         </div>
-      ) : needsNetworkSwitch ? (
-        <div>
+      );
+    }
+
+    if (needsNetworkSwitch) {
+      return (
+        <div style={{ padding: "16px", background: "var(--bg-card)", borderRadius: "8px", marginTop: "16px" }}>
+          <h3 style={{ fontSize: "18px", fontWeight: 600, marginBottom: "16px" }}>
+            Record Agreement on Shardeum
+          </h3>
           <div style={{ fontSize: "14px", color: "var(--text-dim)", marginBottom: "12px" }}>
             Please switch to Shardeum Sphinx network
           </div>
@@ -286,13 +308,20 @@ export default function AgreementSettlement({ agreementData, caseHash, evidenceR
             Switch to Shardeum
           </Button>
         </div>
-      ) : !txHash ? (
-        <div>
+      );
+    }
+
+    if (!txHash) {
+      return (
+        <div style={{ padding: "16px", background: "var(--bg-card)", borderRadius: "8px", marginTop: "16px" }}>
+          <h3 style={{ fontSize: "18px", fontWeight: 600, marginBottom: "16px" }}>
+            Record Agreement on Shardeum
+          </h3>
           <div style={{ fontSize: "14px", color: "var(--text-dim)", marginBottom: "12px" }}>
             Record agreement on Shardeum blockchain
           </div>
           <Button
-            onClick={handleRecord}
+            onClick={handleRecordMetaMask}
             disabled={isPending || isConfirming || !canRecord}
             variant="primary"
           >
@@ -304,11 +333,59 @@ export default function AgreementSettlement({ agreementData, caseHash, evidenceR
             </div>
           )}
         </div>
+      );
+    }
+  }
+
+  // Relayer mode or MetaMask mode with txHash
+  return (
+    <div style={{ padding: "16px", background: "var(--bg-card)", borderRadius: "8px", marginTop: "16px" }}>
+      <h3 style={{ fontSize: "18px", fontWeight: 600, marginBottom: "16px" }}>
+        Record Agreement on Shardeum
+      </h3>
+
+      {!txHash ? (
+        <div>
+          {!useMetaMask && (
+            <>
+              <div style={{ marginBottom: "12px" }}>
+                <Badge variant="default">Relayer Mode</Badge>
+              </div>
+              <div style={{ fontSize: "14px", color: "var(--text-dim)", marginBottom: "12px" }}>
+                On-chain writes are relayed via backend key (hackathon demo)
+              </div>
+            </>
+          )}
+          <Button
+            onClick={useMetaMask ? handleRecordMetaMask : handleRecordRelayer}
+            disabled={(useMetaMask ? (isPending || isConfirming) : isRecording) || !canRecord}
+            variant="primary"
+          >
+            {useMetaMask
+              ? (isPending || isConfirming ? "Recording..." : "Record Agreement on Shardeum")
+              : (isRecording ? "Recording..." : "Record Agreement (Relayed)")}
+          </Button>
+          {error && (
+            <div style={{ marginTop: "12px", fontSize: "12px", color: "var(--accent-red)" }}>
+              Error: {error.message}
+            </div>
+          )}
+          {verificationError && !useMetaMask && (
+            <div style={{ marginTop: "12px", fontSize: "12px", color: "var(--accent-red)" }}>
+              {verificationError}
+            </div>
+          )}
+        </div>
       ) : (
         <div>
           <div style={{ marginBottom: "12px" }}>
             <Badge variant="verified">Recorded</Badge>
           </div>
+          {relayerAddress && (
+            <div style={{ fontSize: "11px", color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginBottom: "8px" }}>
+              Relayer: {relayerAddress.slice(0, 20)}...
+            </div>
+          )}
           <div style={{ fontSize: "12px", color: "var(--text-dim)", marginBottom: "8px", fontFamily: "var(--font-mono)" }}>
             Tx Hash: {txHash.slice(0, 20)}...
           </div>
@@ -351,4 +428,3 @@ export default function AgreementSettlement({ agreementData, caseHash, evidenceR
     </div>
   );
 }
-

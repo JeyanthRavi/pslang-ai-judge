@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from "react";
 import { usePipelineContext } from "@/store/PipelineContext";
-import { useAccount, useSignMessage } from "wagmi";
 import Badge from "@/components/ui/Badge";
 import Button from "@/components/ui/Button";
 import StepShell from "./StepShell";
@@ -12,7 +11,19 @@ import { computeEvidenceRoot } from "@/lib/evidenceUtils";
 import { AgreementData, VerdictData, PSLangData, EvidenceData, ContractReceipt } from "@/types/pipeline";
 import GlassCard from "@/components/ui/GlassCard";
 import AgreementSettlement from "@/components/wallet/AgreementSettlement";
-import { getSimulatedWallet, signMessageSim } from "@/lib/simulatedWallet";
+import { useSimulatedParties } from "@/providers/SimulatedPartiesProvider";
+import { signMessage } from "@/lib/simulatedSigner";
+
+// Conditionally import wagmi only in MetaMask mode
+const walletMode = process.env.NEXT_PUBLIC_WALLET_MODE || "relayer";
+const useMetaMask = walletMode === "metamask";
+
+let useAccount: any, useSignMessage: any;
+if (useMetaMask) {
+  const wagmi = require("wagmi");
+  useAccount = wagmi.useAccount;
+  useSignMessage = wagmi.useSignMessage;
+}
 
 export default function AgreementStep() {
   const { activeStep, steps, completeStep, getStepData } = usePipelineContext();
@@ -20,8 +31,14 @@ export default function AgreementStep() {
   const isCompleted = steps.agreement.status === "completed";
   const existingAgreement = getStepData<AgreementData>("agreement");
   
-  const { address, isConnected } = useAccount();
-  const { signMessageAsync } = useSignMessage();
+  // Wagmi hooks (only in MetaMask mode)
+  const wagmiAccount = useMetaMask ? useAccount() : { address: undefined, isConnected: false };
+  const wagmiSignMessage = useMetaMask ? useSignMessage() : { signMessageAsync: async () => "" };
+  const { address, isConnected } = wagmiAccount;
+  const { signMessageAsync } = wagmiSignMessage;
+
+  // Simulated parties (always available)
+  const { partyA, partyB } = useSimulatedParties();
 
   const [agreement, setAgreement] = useState<AgreementData | null>(existingAgreement || null);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -115,27 +132,21 @@ export default function AgreementStep() {
   const handleSign = async (party: "A" | "B") => {
     if (!agreement) return;
 
-    const walletMode = process.env.NEXT_PUBLIC_WALLET_MODE || "external";
-    const useSim = walletMode === "sim";
-
     setIsSigning(true);
     try {
       const message = `Sign agreement: ${agreement.agreementId}`;
       let signature: string;
       let signerAddress: `0x${string}`;
+      let signerParty = party === "A" ? partyA : partyB;
 
-      if (useSim) {
-        // Use simulated wallet
-        const simWallet = await getSimulatedWallet();
-        signerAddress = simWallet.address;
-        signature = await signMessageSim(message, signerAddress);
-      } else {
-        // Use real wallet
-        if (!isConnected || !address) {
-          throw new Error("Wallet not connected");
-        }
+      if (useMetaMask && isConnected && address) {
+        // Use real wallet (MetaMask mode)
         signerAddress = address;
         signature = await signMessageAsync({ message });
+      } else {
+        // Use simulated party (relayer mode)
+        signerAddress = signerParty.address;
+        signature = await signMessage(message, signerParty);
       }
 
       const updatedAgreement = { ...agreement };
@@ -331,14 +342,12 @@ export default function AgreementStep() {
                 ) : (
                   <Button
                     onClick={() => handleSign("A")}
-                    disabled={isSigning || (process.env.NEXT_PUBLIC_WALLET_MODE !== "sim" && !isConnected)}
+                    disabled={isSigning || (useMetaMask && !isConnected)}
                     variant="secondary"
                   >
-                    {process.env.NEXT_PUBLIC_WALLET_MODE === "sim" 
-                      ? "Sign as Party A (Sim)" 
-                      : isConnected 
-                        ? "Sign as Party A" 
-                        : "Connect Wallet"}
+                    {useMetaMask
+                      ? (isConnected ? "Sign as Party A" : "Connect Wallet")
+                      : "Sign as Party A"}
                   </Button>
                 )}
               </div>
@@ -405,14 +414,12 @@ export default function AgreementStep() {
                         />
                         <Button
                           onClick={() => handleSign("B")}
-                          disabled={isSigning || (process.env.NEXT_PUBLIC_WALLET_MODE !== "sim" && !isConnected)}
+                          disabled={isSigning || (useMetaMask && !isConnected)}
                           variant="secondary"
                         >
-                          {process.env.NEXT_PUBLIC_WALLET_MODE === "sim" 
-                            ? "Sign as Party B (Sim)" 
-                            : isConnected 
-                              ? "Sign as Party B" 
-                              : "Connect Wallet"}
+                          {useMetaMask
+                            ? (isConnected ? "Sign as Party B" : "Connect Wallet")
+                            : "Sign as Party B"}
                         </Button>
                       </div>
                     ) : (

@@ -15,10 +15,9 @@
 - ✅ **Settles on-chain** via Shardeum with confidential receipts (INCO)
 
 **Sponsor Integrations:**
-- **ThinkRoot:** Voice-first flow + PSLang visualization (UI proof)
+- **ThinkRoot (PRIMARY):** PSLang intent translation + code-generation-ready spec (FALLBACK works now, LIVE with API keys)
 - **Shardeum:** On-chain settlement (ready for deployment)
 - **INCO:** Confidential evaluation (local proof, adapter ready)
-- **Flux:** Decentralized compute hosting (ready for deployment)
 
 **Key Innovation:** Status badges are **runtime-derived** (never hardcoded). Integration statuses update based on actual conditions.
 
@@ -38,10 +37,12 @@
 - Immutable ledger after sealing
 - Evidence references in PSLang
 
-**PSLang Compilation**
-- Dynamic from transcript
+**PSLang Intent Translation (ThinkRoot)**
+- Natural language → Structured JSON (code-generation-ready)
+- FALLBACK mode works now (deterministic parser)
+- LIVE mode ready (switches automatically when API keys provided)
 - Evidence-aware compilation
-- Stable hash generation
+- Stable hash generation (used for on-chain verification)
 
 **Judge Backend**
 - Deterministic verdict generation
@@ -64,11 +65,6 @@
 - **Status:** DEMO (until contract deployed)
 - **To make LIVE:** Deploy contract, set `NEXT_PUBLIC_VERDICT_CONTRACT_ADDRESS`
 
-**Flux Compute**
-- Endpoint switching works
-- Latency tracking works
-- **Status:** READY (until service deployed)
-- **To make LIVE:** Deploy to FluxCloud, set env vars
 
 ---
 
@@ -86,17 +82,32 @@
 
 ## Where Judges Can Verify Each Integration
 
-### ThinkRoot (Voice + PSLang)
+### ThinkRoot (PSLang Intent Translation + Code Generation)
 
-**Location:** Intent step → PSLang step
+**Location:** Intent step → PSLang step → ReviewModeDrawer
 
 **What to Check:**
 1. Voice tab is default
 2. Record voice → see real-time transcript
-3. PSLang compiles from transcript
-4. Evidence references appear in PSLang (if evidence sealed first)
+3. PSLang compiles from transcript → see structured JSON
+4. Check mode badge: "LIVE" (if API configured) or "FALLBACK" (deterministic parser)
+5. Expand "View Technical Details" → see full parsed intent JSON
+6. Note intent hash (SHA-256) → used for on-chain verification
+7. Evidence references appear in PSLang (if evidence sealed first)
+8. Check ReviewModeDrawer → PSLang hash, mode indicator
 
-**Proof:** Voice-first flow, PSLang visualization with animated reveal
+**Proof:** 
+- Voice-first flow
+- PSLang visualization with animated reveal
+- Structured intent JSON (code-generation-ready)
+- Mode transparency (LIVE/FALLBACK)
+- Intent hash for on-chain verification
+
+**Code-Generation Readiness:**
+- Parsed intent JSON can drive smart contract calls
+- Can generate agreement text automatically
+- Can create dispute template code
+- Can assemble legal documents programmatically
 
 ---
 
@@ -138,21 +149,6 @@
 
 ---
 
-### Flux (Decentralized Compute)
-
-**Location:** Deliberation step (indicator) → ReviewModeDrawer
-
-**What to Check:**
-1. Complete pipeline to Deliberation
-2. Click "Begin Deliberation"
-3. See compute indicator (if Flux mode)
-4. Check ReviewModeDrawer → Flux status (READY or LIVE)
-
-**Proof:** Endpoint switching, latency tracking, status badge
-
-**Status Logic:**
-- **LIVE:** judge mode = flux + base URL set + last call succeeded
-- **READY:** dockerfile exists + endpoint switch exists but not in flux mode
 
 ---
 
@@ -160,10 +156,9 @@
 
 | Sponsor | Current Status | Where to Verify | How to Make LIVE |
 |---------|---------------|-----------------|------------------|
-| **ThinkRoot** | ✅ UI Proof | Intent, PSLang steps | Already demonstrated |
+| **ThinkRoot** | ✅ FALLBACK works / LIVE with API keys | PSLang step, ReviewModeDrawer | Set `NEXT_PUBLIC_PSLANG_API_URL` + `NEXT_PUBLIC_PSLANG_API_KEY` |
 | **Shardeum** | 🟡 DEMO | Verdict → Settlement | Deploy contract, set env var |
 | **INCO** | 🔵 LOCAL_PROOF | Deliberation, Verdict | Integrate INCO SDK |
-| **Flux** | 🟡 READY | Deliberation, ReviewModeDrawer | Deploy to FluxCloud, set env vars |
 
 ---
 
@@ -233,7 +228,6 @@
 
 **What Requires Deployment:**
 - 🟡 Shardeum LIVE (contract deployment)
-- 🟡 Flux LIVE (FluxCloud deployment)
 
 **What Requires SDK Integration:**
 - 🔵 INCO LIVE (INCO SDK integration)

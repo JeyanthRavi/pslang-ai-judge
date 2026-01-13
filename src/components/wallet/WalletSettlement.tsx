@@ -1,14 +1,30 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useAccount, useConnect, useSwitchChain, useWriteContract, useWaitForTransactionReceipt, useReadContract } from "wagmi";
-import { parseEther, Address } from "viem";
 import { shardeumSphinx, VERDICT_CONTRACT_ADDRESS } from "@/lib/chains";
 import Button from "@/components/ui/Button";
 import Badge from "@/components/ui/Badge";
 import { usePipelineContext } from "@/store/PipelineContext";
 import { computeEvidenceRoot } from "@/lib/evidenceUtils";
 import { EvidenceData } from "@/types/pipeline";
+
+// Conditionally import wagmi only in MetaMask mode
+const walletMode = process.env.NEXT_PUBLIC_WALLET_MODE || "relayer";
+const useMetaMask = walletMode === "metamask";
+
+// Dynamic imports for wagmi (only if MetaMask mode)
+let useAccount: any, useConnect: any, useSwitchChain: any, useWriteContract: any, useWaitForTransactionReceipt: any, useReadContract: any, Address: any;
+if (useMetaMask) {
+  const wagmi = require("wagmi");
+  const viem = require("viem");
+  useAccount = wagmi.useAccount;
+  useConnect = wagmi.useConnect;
+  useSwitchChain = wagmi.useSwitchChain;
+  useWriteContract = wagmi.useWriteContract;
+  useWaitForTransactionReceipt = wagmi.useWaitForTransactionReceipt;
+  useReadContract = wagmi.useReadContract;
+  Address = viem.Address;
+}
 
 // VerdictSettlement ABI
 const VERDICT_ABI = [
@@ -42,13 +58,27 @@ const VERDICT_ABI = [
 
 export default function WalletSettlement() {
   const { getStepData, demoMode, completeStep } = usePipelineContext();
-  const { address, isConnected, chainId } = useAccount();
-  const { connect, connectors } = useConnect();
-  const { switchChain } = useSwitchChain();
-  const { writeContract, data: hash, isPending, error } = useWriteContract();
-  const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({
-    hash,
-  });
+  
+  // Wagmi hooks (only in MetaMask mode)
+  const wagmiAccount = useMetaMask ? useAccount() : { address: undefined, isConnected: false, chainId: undefined };
+  const wagmiConnect = useMetaMask ? useConnect() : { connect: () => {}, connectors: [] };
+  const wagmiSwitchChain = useMetaMask ? useSwitchChain() : { switchChain: () => {} };
+  const wagmiWriteContract = useMetaMask ? useWriteContract() : { writeContract: () => {}, data: null, isPending: false, error: null };
+  const wagmiWaitReceipt = useMetaMask ? useWaitForTransactionReceipt({ hash: wagmiWriteContract.data }) : { isLoading: false, isSuccess: false };
+  const wagmiReadContract = useMetaMask ? useReadContract({
+    address: VERDICT_CONTRACT_ADDRESS ? (VERDICT_CONTRACT_ADDRESS as any) : undefined,
+    abi: VERDICT_ABI,
+    functionName: "getReceipt",
+    args: undefined,
+    query: { enabled: false },
+  }) : { data: null, refetch: async () => ({ data: null }) };
+
+  const { address, isConnected, chainId } = wagmiAccount;
+  const { connect, connectors } = wagmiConnect;
+  const { switchChain } = wagmiSwitchChain;
+  const { writeContract, data: hash, isPending, error } = wagmiWriteContract;
+  const { isLoading: isConfirming, isSuccess: isConfirmed } = wagmiWaitReceipt;
+  const { data: onChainReceipt, refetch: refetchReceipt } = wagmiReadContract;
 
   const pslangData = getStepData("pslang");
   const verdictDataFromContext = getStepData("deliberation");
@@ -56,19 +86,12 @@ export default function WalletSettlement() {
   const [txHash, setTxHash] = useState<string | null>(verdictDataFromContext?.txHash || null);
   const [evidenceRoot, setEvidenceRoot] = useState<`0x${string}` | null>(null);
   const [isVerifying, setIsVerifying] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
   const [verifiedReceipt, setVerifiedReceipt] = useState<any>(null);
+  const [relayerAddress, setRelayerAddress] = useState<string | null>(null);
   
   // Read contract hook for verification (disabled by default, enabled via refetch)
   const caseHash = pslangData ? (`0x${pslangData.hash.replace("0x", "")}` as `0x${string}`) : undefined;
-  const { data: onChainReceipt, refetch: refetchReceipt } = useReadContract({
-    address: VERDICT_CONTRACT_ADDRESS ? (VERDICT_CONTRACT_ADDRESS as Address) : undefined,
-    abi: VERDICT_ABI,
-    functionName: "getReceipt",
-    args: caseHash ? [caseHash] : undefined,
-    query: {
-      enabled: false, // Only fetch when explicitly called via refetch
-    },
-  });
   
   // Compute evidence root when evidence is available
   useEffect(() => {
@@ -83,9 +106,8 @@ export default function WalletSettlement() {
 
   // Update tx hash when transaction is confirmed and persist to deliberation
   useEffect(() => {
-    if (isConfirmed && hash && verdictDataFromContext) {
+    if (useMetaMask && isConfirmed && hash && verdictDataFromContext) {
       setTxHash(hash);
-      // Update deliberation step data with tx hash
       completeStep("deliberation", {
         ...verdictDataFromContext,
         txHash: hash,
@@ -105,21 +127,63 @@ export default function WalletSettlement() {
   // Get confidence in basis points (0-10000)
   const getConfidenceBps = (): number => {
     if (!verdictDataFromContext?.confidence) return 5000;
-    return Math.round(verdictDataFromContext.confidence * 10000);
+    // Confidence is already 0-100, convert to basis points (0-10000)
+    return Math.round(verdictDataFromContext.confidence * 100);
   };
 
-  const handleConnect = () => {
-    const connector = connectors[0];
-    if (connector) {
-      connect({ connector });
+  // Relayer mode: record via API
+  const handleRecordRelayer = async () => {
+    if (!pslangData || !verdictDataFromContext || !VERDICT_CONTRACT_ADDRESS) {
+      console.error("Missing data or contract address");
+      return;
+    }
+
+    setIsRecording(true);
+    try {
+      const caseHash = `0x${pslangData.hash.replace("0x", "")}` as `0x${string}`;
+      const outcomeCode = getOutcomeCode();
+      const confidenceBps = getConfidenceBps();
+      const evRoot = (evidenceRoot || "0x0000000000000000000000000000000000000000000000000000000000000000") as `0x${string}`;
+
+      const response = await fetch("/api/chain/record-receipt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          caseHash,
+          outcomeCode,
+          confidenceBps,
+          evidenceRoot: evRoot,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Failed to record receipt");
+      }
+
+      const { txHash: newTxHash } = await response.json();
+      setTxHash(newTxHash);
+      
+      // Get relayer address from response or derive it
+      if (response.headers.get("x-relayer-address")) {
+        setRelayerAddress(response.headers.get("x-relayer-address"));
+      }
+
+      // Update deliberation step data with tx hash
+      completeStep("deliberation", {
+        ...verdictDataFromContext,
+        txHash: newTxHash,
+      });
+    } catch (err) {
+      console.error("Relayer settlement error:", err);
+      alert(err instanceof Error ? err.message : "Failed to record receipt");
+    } finally {
+      setIsRecording(false);
     }
   };
 
-  const handleSwitchNetwork = () => {
-    switchChain({ chainId: shardeumSphinx.id });
-  };
-
-  const handleSettle = async () => {
+  // MetaMask mode: record via wallet
+  const handleSettleMetaMask = async () => {
     if (!pslangData || !verdictDataFromContext || !VERDICT_CONTRACT_ADDRESS) {
       console.error("Missing data or contract address");
       return;
@@ -132,7 +196,7 @@ export default function WalletSettlement() {
       const evRoot = (evidenceRoot || "0x0000000000000000000000000000000000000000000000000000000000000000") as `0x${string}`;
 
       writeContract({
-        address: VERDICT_CONTRACT_ADDRESS as Address,
+        address: VERDICT_CONTRACT_ADDRESS as any,
         abi: VERDICT_ABI,
         functionName: "recordReceipt",
         args: [caseHash, outcomeCode, confidenceBps, evRoot],
@@ -142,14 +206,39 @@ export default function WalletSettlement() {
     }
   };
 
+  const handleConnect = () => {
+    if (!useMetaMask) return;
+    const connector = connectors[0];
+    if (connector) {
+      connect({ connector });
+    }
+  };
+
+  const handleSwitchNetwork = () => {
+    if (!useMetaMask) return;
+    switchChain({ chainId: shardeumSphinx.id });
+  };
+
   const handleVerifyReceipt = async () => {
-    if (!pslangData || !VERDICT_CONTRACT_ADDRESS || !isConnected) return;
+    if (!pslangData || !VERDICT_CONTRACT_ADDRESS) return;
     
     setIsVerifying(true);
     try {
-      const result = await refetchReceipt();
-      if (result.data) {
-        setVerifiedReceipt(result.data);
+      if (useMetaMask && isConnected) {
+        // Use wagmi read contract
+        const result = await refetchReceipt();
+        if (result.data) {
+          setVerifiedReceipt(result.data);
+        }
+      } else {
+        // Use API read
+        const response = await fetch(`/api/chain/read-receipt?caseHash=${caseHash}`);
+        if (response.ok) {
+          const { receipt } = await response.json();
+          setVerifiedReceipt(receipt);
+        } else {
+          throw new Error("Failed to read receipt");
+        }
       }
     } catch (err) {
       console.error("Verification error:", err);
@@ -161,7 +250,7 @@ export default function WalletSettlement() {
 
   // Update verified receipt when read contract data changes
   useEffect(() => {
-    if (onChainReceipt) {
+    if (useMetaMask && onChainReceipt) {
       setVerifiedReceipt(onChainReceipt);
     }
   }, [onChainReceipt]);
@@ -213,7 +302,151 @@ export default function WalletSettlement() {
     );
   }
 
-  if (!isConnected) {
+  // MetaMask mode: show wallet connection flow
+  if (useMetaMask) {
+    if (!isConnected) {
+      return (
+        <div style={{
+          padding: "20px",
+          background: "var(--bg-dim)",
+          border: "1px solid var(--border-dim)",
+          borderRadius: "2px",
+          marginBottom: "20px",
+        }}>
+          <div style={{
+            fontSize: "14px",
+            fontWeight: 600,
+            marginBottom: "12px",
+          }}>
+            Record outcome
+          </div>
+          <div style={{
+            fontSize: "12px",
+            color: "var(--text-dim)",
+            marginBottom: "12px",
+          }}>
+            Connect wallet to create a public receipt
+          </div>
+          <Button onClick={handleConnect} size="sm">
+            Connect wallet
+          </Button>
+        </div>
+      );
+    }
+
+    if (chainId !== shardeumSphinx.id) {
+      return (
+        <div style={{
+          padding: "20px",
+          background: "var(--bg-dim)",
+          border: "1px solid var(--border-dim)",
+          borderRadius: "2px",
+          marginBottom: "20px",
+        }}>
+          <div style={{
+            fontSize: "14px",
+            fontWeight: 600,
+            marginBottom: "12px",
+          }}>
+            Wrong Network
+          </div>
+          <div style={{
+            fontSize: "12px",
+            color: "var(--text-dim)",
+            marginBottom: "12px",
+          }}>
+            Please switch to the correct network
+          </div>
+          <Button onClick={handleSwitchNetwork} size="sm">
+            Switch Network
+          </Button>
+        </div>
+      );
+    }
+
+    if (isConfirmed && txHash) {
+      return (
+        <div style={{
+          padding: "20px",
+          background: "var(--bg-dim)",
+          border: "1px solid var(--neon-accent)",
+          borderRadius: "2px",
+          marginBottom: "20px",
+        }}>
+          <div style={{
+            fontSize: "14px",
+            fontWeight: 600,
+            marginBottom: "12px",
+            color: "var(--neon-accent)",
+          }}>
+            ✓ Outcome recorded
+          </div>
+          <div style={{
+            fontSize: "11px",
+            color: "var(--text-dim)",
+            fontFamily: "var(--font-mono)",
+            marginBottom: "12px",
+            wordBreak: "break-all",
+          }}>
+            Tx Hash: {txHash}
+          </div>
+          <div style={{
+            display: "flex",
+            gap: "12px",
+            alignItems: "center",
+            marginBottom: "12px",
+          }}>
+            <a
+              href={`https://explorer-sphinx.shardeum.org/tx/${txHash}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                fontSize: "12px",
+                color: "var(--neon-accent)",
+                textDecoration: "none",
+                fontWeight: 600,
+              }}
+            >
+              View public receipt →
+            </a>
+            <Button
+              onClick={handleVerifyReceipt}
+              disabled={isVerifying}
+              size="sm"
+              variant="secondary"
+            >
+              {isVerifying ? "Verifying..." : "Verify receipt"}
+            </Button>
+          </div>
+          {verifiedReceipt && (
+            <div style={{
+              marginTop: "16px",
+              padding: "12px",
+              background: "var(--background)",
+              border: "1px solid var(--border-dim)",
+              borderRadius: "2px",
+              fontSize: "11px",
+              color: "var(--text-dim)",
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: "8px", color: "var(--neon-accent)" }}>
+                ✓ Verified on-chain
+              </div>
+              <div>Outcome: {verifiedReceipt.outcomeCode === 2 ? "Approved" : verifiedReceipt.outcomeCode === 1 ? "Partial" : "Rejected"}</div>
+              <div>Confidence: {Math.round(verifiedReceipt.confidenceBps / 100)}%</div>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", marginTop: "4px" }}>
+                Evidence root: {verifiedReceipt.evidenceRoot.slice(0, 20)}...
+              </div>
+              {evidenceRoot && verifiedReceipt.evidenceRoot.toLowerCase() === evidenceRoot.toLowerCase() && (
+                <div style={{ color: "var(--neon-accent)", marginTop: "4px" }}>
+                  ✓ Evidence root matches
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     return (
       <div style={{
         padding: "20px",
@@ -232,48 +465,32 @@ export default function WalletSettlement() {
         <div style={{
           fontSize: "12px",
           color: "var(--text-dim)",
-          marginBottom: "12px",
+          marginBottom: "16px",
         }}>
-          Connect wallet to create a public receipt
+          Wallet connected
         </div>
-        <Button onClick={handleConnect} size="sm">
-          Connect wallet
+        <Button
+          onClick={handleSettleMetaMask}
+          disabled={isPending || isConfirming}
+          size="sm"
+        >
+          {isPending || isConfirming ? "Processing..." : "Record on chain"}
         </Button>
+        {error && (
+          <div style={{
+            marginTop: "12px",
+            fontSize: "11px",
+            color: "var(--text-dim)",
+          }}>
+            Error: {error.message}
+          </div>
+        )}
       </div>
     );
   }
 
-  if (chainId !== shardeumSphinx.id) {
-    return (
-      <div style={{
-        padding: "20px",
-        background: "var(--bg-dim)",
-        border: "1px solid var(--border-dim)",
-        borderRadius: "2px",
-        marginBottom: "20px",
-      }}>
-        <div style={{
-          fontSize: "14px",
-          fontWeight: 600,
-          marginBottom: "12px",
-        }}>
-          Wrong Network
-        </div>
-        <div style={{
-          fontSize: "12px",
-          color: "var(--text-dim)",
-          marginBottom: "12px",
-        }}>
-          Please switch to the correct network
-        </div>
-        <Button onClick={handleSwitchNetwork} size="sm">
-          Switch Network
-        </Button>
-      </div>
-    );
-  }
-
-  if (isConfirmed && txHash) {
+  // Relayer mode: show relayer flow
+  if (txHash) {
     return (
       <div style={{
         padding: "20px",
@@ -288,8 +505,18 @@ export default function WalletSettlement() {
           marginBottom: "12px",
           color: "var(--neon-accent)",
         }}>
-          ✓ Outcome recorded
+          ✓ Outcome recorded (Relayed)
         </div>
+        {relayerAddress && (
+          <div style={{
+            fontSize: "11px",
+            color: "var(--text-dim)",
+            fontFamily: "var(--font-mono)",
+            marginBottom: "8px",
+          }}>
+            Relayer: {relayerAddress.slice(0, 20)}...
+          </div>
+        )}
         <div style={{
           fontSize: "11px",
           color: "var(--text-dim)",
@@ -340,7 +567,7 @@ export default function WalletSettlement() {
             <div style={{ fontWeight: 600, marginBottom: "8px", color: "var(--neon-accent)" }}>
               ✓ Verified on-chain
             </div>
-            <div>Outcome: {verifiedReceipt.outcomeCode === 2 ? "Approved" : verifiedReceipt.outcomeCode === 1 ? "Partial" : "Not supported"}</div>
+            <div>Outcome: {verifiedReceipt.outcomeCode === 2 ? "Approved" : verifiedReceipt.outcomeCode === 1 ? "Partial" : "Rejected"}</div>
             <div>Confidence: {Math.round(verifiedReceipt.confidenceBps / 100)}%</div>
             <div style={{ fontFamily: "var(--font-mono)", fontSize: "10px", marginTop: "4px" }}>
               Evidence root: {verifiedReceipt.evidenceRoot.slice(0, 20)}...
@@ -369,32 +596,22 @@ export default function WalletSettlement() {
         fontWeight: 600,
         marginBottom: "12px",
       }}>
-        Record outcome
+        Record outcome (Relayed)
       </div>
       <div style={{
         fontSize: "12px",
         color: "var(--text-dim)",
         marginBottom: "16px",
       }}>
-        Wallet connected
+        On-chain writes are relayed via backend key (hackathon demo)
       </div>
       <Button
-        onClick={handleSettle}
-        disabled={isPending || isConfirming}
+        onClick={handleRecordRelayer}
+        disabled={isRecording}
         size="sm"
       >
-        {isPending || isConfirming ? "Processing..." : "Record on chain"}
+        {isRecording ? "Recording..." : "Record on Shardeum (Relayed)"}
       </Button>
-      {error && (
-        <div style={{
-          marginTop: "12px",
-          fontSize: "11px",
-          color: "var(--text-dim)",
-        }}>
-          Error: {error.message}
-        </div>
-      )}
     </div>
   );
 }
-

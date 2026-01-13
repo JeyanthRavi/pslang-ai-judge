@@ -1,12 +1,21 @@
 "use client";
 
-import { useAccount } from "wagmi";
 import { usePipelineContext } from "@/store/PipelineContext";
 import { getAllIntegrationStatuses } from "@/lib/integrationStatus";
 import { VERDICT_CONTRACT_ADDRESS } from "@/lib/chains";
 
+// Conditionally import wagmi only in MetaMask mode
+const walletMode = process.env.NEXT_PUBLIC_WALLET_MODE || "relayer";
+const useMetaMask = walletMode === "metamask";
+
+let useAccount: any;
+if (useMetaMask) {
+  useAccount = require("wagmi").useAccount;
+}
+
 export default function IntegrationsPage() {
-  const { isConnected, chainId } = useAccount();
+  const wagmiAccount = useMetaMask ? useAccount() : { isConnected: false, chainId: undefined };
+  const { isConnected, chainId } = wagmiAccount;
   const { demoMode, incoMode, getStepData } = usePipelineContext();
   
   // Safely get verdict data (may be empty if pipeline not started)
@@ -24,6 +33,7 @@ export default function IntegrationsPage() {
     contractAddress: VERDICT_CONTRACT_ADDRESS,
     txHash,
     demoMode,
+    walletMode,
     agreementTxHash,
     agreementVerified,
     incoMode,

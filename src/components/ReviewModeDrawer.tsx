@@ -2,15 +2,24 @@
 
 import { useState, useEffect } from "react";
 import { usePipelineContext } from "@/store/PipelineContext";
-import { useAccount } from "wagmi";
 import { motion } from "framer-motion";
 import Badge from "@/components/ui/Badge";
 import { getAllIntegrationStatuses } from "@/lib/integrationStatus";
 import { VERDICT_CONTRACT_ADDRESS } from "@/lib/chains";
 
+// Conditionally import wagmi only in MetaMask mode
+const walletMode = process.env.NEXT_PUBLIC_WALLET_MODE || "relayer";
+const useMetaMask = walletMode === "metamask";
+
+let useAccount: any;
+if (useMetaMask) {
+  useAccount = require("wagmi").useAccount;
+}
+
 export default function ReviewModeDrawer() {
   const { getStepData, demoMode, incoMode, reviewBuildMode } = usePipelineContext();
-  const { address, chainId, isConnected } = useAccount();
+  const wagmiAccount = useMetaMask ? useAccount() : { address: undefined, chainId: undefined, isConnected: false };
+  const { address, chainId, isConnected } = wagmiAccount;
   const [isOpen, setIsOpen] = useState(reviewBuildMode); // Auto-open if Review Build Mode is ON
   const [judgeLatency, setJudgeLatency] = useState<number | null>(null);
   
@@ -49,6 +58,7 @@ export default function ReviewModeDrawer() {
     contractAddress: VERDICT_CONTRACT_ADDRESS,
     txHash,
     demoMode,
+    walletMode,
     agreementTxHash,
     agreementVerified,
     incoMode,
@@ -208,6 +218,30 @@ export default function ReviewModeDrawer() {
               <Badge variant={demoMode ? "warning" : "info"}>
                 {demoMode ? "Demo" : "Live"}
               </Badge>
+            </div>
+
+            <div>
+              <div style={{
+                fontSize: "11px",
+                fontWeight: 600,
+                color: "var(--text-dim)",
+                marginBottom: "6px",
+                textTransform: "uppercase",
+              }}>
+                Wallet Mode
+              </div>
+              <Badge variant="default">
+                {walletMode === "metamask" ? "MetaMask" : "Relayer"}
+              </Badge>
+              {walletMode !== "metamask" && (
+                <div style={{
+                  fontSize: "10px",
+                  color: "var(--text-dim)",
+                  marginTop: "4px",
+                }}>
+                  Simulated Parties: ON
+                </div>
+              )}
             </div>
 
             <div>

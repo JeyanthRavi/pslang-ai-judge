@@ -14,6 +14,7 @@ export interface IntegrationStatuses {
 
 /**
  * Compute Shardeum status based on runtime conditions
+ * Supports both MetaMask mode (walletConnected required) and Relayer mode (txHash + contractAddress sufficient)
  */
 export function getShardeumStatus(params: {
   walletConnected: boolean;
@@ -21,12 +22,21 @@ export function getShardeumStatus(params: {
   contractAddress?: string;
   txHash?: string | null;
   demoMode: boolean;
+  walletMode?: string; // "metamask" | "relayer"
 }): ShardeumStatus {
   if (params.demoMode) {
     return "DEMO";
   }
 
-  // LIVE only if: wallet connected + chainId 8082 + contract address + tx hash exists
+  const isRelayerMode = params.walletMode === "relayer" || !params.walletMode;
+
+  // Relayer mode: LIVE if contract address + tx hash exists (no wallet required)
+  if (isRelayerMode) {
+    const isLive = !!params.contractAddress && !!params.txHash;
+    return isLive ? "LIVE" : "READY";
+  }
+
+  // MetaMask mode: LIVE only if: wallet connected + chainId 8082 + contract address + tx hash exists
   const isLive =
     params.walletConnected &&
     params.chainId === 8082 &&
@@ -52,6 +62,7 @@ export function getIncoStatus(params: {
 
 /**
  * Get Shardeum agreement status
+ * Supports both MetaMask mode and Relayer mode
  */
 export function getShardeumAgreementStatus(params: {
   walletConnected: boolean;
@@ -60,12 +71,24 @@ export function getShardeumAgreementStatus(params: {
   agreementTxHash?: string | null;
   agreementVerified?: boolean;
   demoMode: boolean;
+  walletMode?: string; // "metamask" | "relayer"
 }): ShardeumStatus {
   if (params.demoMode) {
     return "DEMO";
   }
 
-  // LIVE only if: wallet connected + chainId 8082 + contract address + tx hash exists + verified
+  const isRelayerMode = params.walletMode === "relayer" || !params.walletMode;
+
+  // Relayer mode: LIVE if contract address + tx hash exists + verified (no wallet required)
+  if (isRelayerMode) {
+    const isLive = !!params.contractAddress && !!params.agreementTxHash && params.agreementVerified === true;
+    const isReady = !!params.contractAddress && !!params.agreementTxHash;
+    if (isLive) return "LIVE";
+    if (isReady) return "READY";
+    return "DEMO";
+  }
+
+  // MetaMask mode: LIVE only if: wallet connected + chainId 8082 + contract address + tx hash exists + verified
   const isLive =
     params.walletConnected &&
     params.chainId === 8082 &&
@@ -95,6 +118,7 @@ export function getAllIntegrationStatuses(params: {
   contractAddress?: string;
   txHash?: string | null;
   demoMode: boolean;
+  walletMode?: string; // "metamask" | "relayer"
   // Shardeum Agreement
   agreementTxHash?: string | null;
   agreementVerified?: boolean;
@@ -109,6 +133,7 @@ export function getAllIntegrationStatuses(params: {
       contractAddress: params.contractAddress,
       txHash: params.txHash,
       demoMode: params.demoMode,
+      walletMode: params.walletMode,
     }),
     shardeumAgreement: getShardeumAgreementStatus({
       walletConnected: params.walletConnected,
@@ -117,6 +142,7 @@ export function getAllIntegrationStatuses(params: {
       agreementTxHash: params.agreementTxHash,
       agreementVerified: params.agreementVerified,
       demoMode: params.demoMode,
+      walletMode: params.walletMode,
     }),
     inco: getIncoStatus({
       incoMode: params.incoMode,
